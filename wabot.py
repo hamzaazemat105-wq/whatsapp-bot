@@ -27,7 +27,7 @@ import urllib.request
 import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-VERSION = "2026-10-06-w10"
+VERSION = "2026-10-06-w11"
 
 # ---------------------------------------------------------------- config ---
 def clean(v):
@@ -154,13 +154,17 @@ def send_voice_for_intent(to, intent):
 # ------------------------------------------------------- products -----
 # Products are managed by Hamza via WhatsApp admin commands.
 # Stored in products.json: [{"name": "...", "price": "...", "desc": "..."}]
+SEED_VERSION = 2  # bump when products_seed.json changes
+
 def get_products():
     prods = _load_json(PRODUCTS_FILE, [])
-    if not prods:
-        # first run: seed from bundled product list
+    seed_ver = _load_json(os.path.join(_HERE, "seed_version.json"), 0)
+    if not prods or seed_ver < SEED_VERSION:
+        # first run or seed updated: load from bundled product list
         seed = _load_json(os.path.join(_HERE, "products_seed.json"), [])
         if seed:
             _save_json(PRODUCTS_FILE, seed)
+            _save_json(os.path.join(_HERE, "seed_version.json"), SEED_VERSION)
             return seed
     return prods
 
@@ -303,28 +307,28 @@ def detect_intent(text):
 def handle_products(to):
     prods = get_products()
     if not prods:
-        return ("🛍️ **المنتجات:**\n\n"
-                "دابا ما كاين حتى منتج مسجل.\n"
-                "تواصل معانا باش نعطيوك اللائحة! 📩")
-    lines = ["🛍️ **المنتجات المتوفرة:**\n"]
+        return ("🛍️ **Produits:**\n\n"
+                "Aucun produit pour le moment.\n"
+                "Contactez-nous pour la liste! 📩")
+    lines = ["🛍️ **Produits disponibles:**\n"]
     for p in prods[:20]:
         lines.append(f"🟢 {p.get('name', '?')} — **{p.get('price', '?')}**")
     if len(prods) > 20:
-        lines.append(f"\n...و {len(prods) - 20} منتجات أخرى.")
-    lines.append("\nكتب *اسم المنتج* باش تشوف التفاصيل.")
+        lines.append(f"\n...et {len(prods) - 20} autres produits.")
+    lines.append("\nÉcris le *nom du produit* pour voir les détails.")
     return "\n".join(lines)
 
 def handle_product_query(to, text):
     found = find_product(text)
     if not found:
-        return ("🔍 ما لقيتش هاد المنتج.\n"
-                "كتب *منتجات* باش تشوف اللائحة، ولا جرب اسم آخر.")
+        return ("🔍 Produit non trouvé.\n"
+                "Écris *produits* pour voir la liste.")
     lines = []
     for p in found:
         desc = p.get("desc", "")
-        lines.append(f"📦 **{p.get('name', '?')}**\n🟢 متوفر — **{p.get('price', '?')}**" +
+        lines.append(f"📦 **{p.get('name', '?')}**\n🟢 Disponible — **{p.get('price', '?')}**" +
                      (f"\n📝 {desc[:200]}" if desc else ""))
-    lines.append("\nباش تشري، كتب: *بغيت نشري* + اسم المنتج")
+    lines.append("\nPour acheter, écris: *je veux acheter* + nom du produit")
     return "\n\n".join(lines)
 
 def smart_reply(to, text, name=""):
