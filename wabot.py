@@ -27,7 +27,7 @@ import urllib.request
 import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-VERSION = "2026-10-06-w12"
+VERSION = "2026-10-06-w14"
 
 # ---------------------------------------------------------------- config ---
 def clean(v):
@@ -223,29 +223,52 @@ def find_product(query):
     return [p for _, p in scored[:5]]
 
 def handle_product_choice(to, text, matches):
-    """Customer is choosing between multiple product variants."""
-    low = text.lower()
-    # try to match their answer to one of the variants
+    """Customer is choosing between multiple product variants. Fully generic."""
+    low = text.lower().strip()
+    # 1. number selection: "1", "2", "الاول", "premier", etc.
+    num_words = {"1": 0, "2": 1, "3": 2, "4": 3, "5": 4,
+                 "الاول": 0, "الأول": 0, "الاول": 0, "الزوج": 1, "الثاني": 1,
+                 "premier": 0, "deuxième": 1, "deuxieme": 1, "troisième": 2,
+                 "first": 0, "second": 1, "third": 2}
+    for kw, idx in num_words.items():
+        if kw in low and idx < len(matches):
+            return format_single_product(matches[idx])
+    # 2. find distinguishing words between variants
+    #    (words that appear in one variant but not others)
+    all_names = [p.get("name", "").lower() for p in matches]
+    common = set(all_names[0].split())
+    for n in all_names[1:]:
+        common &= set(n.split())
     for p in matches:
-        name_low = p.get("name", "").lower()
-        # check for variant keywords
-        if any(k in low for k in ("personnel", "privé", "prive", "خاص", "شخصي", "personal", "1")) and \
-           any(k in name_low for k in ("personnel", "privé", "prive", "شخصي")):
-            return format_single_product(p)
-        if any(k in low for k in ("partagé", "partage", "مشترك", "shared", "2")) and \
-           any(k in name_low for k in ("partagé", "partage", "مشترك")):
-            return format_single_product(p)
-    # fallback: try fuzzy match against variant names
-    best = None
-    best_score = 0
+        name_words = [w for w in p.get("name", "").lower().split()
+                      if w not in common and len(w) >= 3]
+        # also check description words
+        desc_words = [w for w in p.get("desc", "").lower().split()
+                      if len(w) >= 4][:5]
+        for w in name_words + desc_words:
+            if w in low:
+                return format_single_product(p)
+    # 3. variant keywords (shared/private, career/business, etc.)
+    variant_kws = {
+        "personnel": ("personnel", "privé", "prive", "خاص", "شخصي", "personal", "private"),
+        "partagé": ("partagé", "partage", "مشترك", "shared"),
+        "career": ("career", "carrière", "carriere"),
+        "business": ("business", "entreprise"),
+    }
+    for p in matches:
+        nl = p.get("name", "").lower()
+        for vkey, kws in variant_kws.items():
+            if vkey in nl and any(k in low for k in kws):
+                return format_single_product(p)
+    # 4. fuzzy match against variant names
+    best, best_score = None, 0
     for p in matches:
         s = _similarity(low, p.get("name", "").lower())
         if s > best_score:
-            best_score = s
-            best = p
+            best_score, best = s, p
     if best and best_score >= 0.5:
         return format_single_product(best)
-    # still unclear: list the options again
+    # 5. still unclear: list options again
     lines = ["ما فهمتش، ختار واحد من هادو 👇\n"]
     for i, p in enumerate(matches, 1):
         lines.append(f"{i}️⃣ {p.get('name', '?')} — **{p.get('price', '?')}**")
@@ -479,10 +502,28 @@ def smart_reply(to, text, name=""):
             reply = handle_product_query(to, text)
         else:
             reply = REPLIES["fallback"]
+            # log unknown query for learning
+            log_unknown_query(text)
 
     conv["history"].append({"from": "bot", "text": reply[:500], "ts": time.time()})
     _save_json(CONV_FILE, CONV)
     return reply
+
+def log_unknown_query(text):
+    """Track questions the bot couldn't answer so Hamza can teach it."""
+    if len(text.strip()) < 3:
+        return
+    path = os.path.join(_HERE, "unknown_queries.json")
+    unknown = _load_json(path, [])
+    # increment count if already logged
+    for q in unknown:
+        if q.get("text", "").lower() == text.lower().strip():
+            q["count"] = q.get("count", 1) + 1
+            q["last"] = time.time()
+            _save_json(path, unknown)
+            return
+    unknown.append({"text": text.strip()[:200], "count": 1, "last": time.time()})
+    _save_json(path, unknown[-50:])  # keep last 50
 
 def notify_admin(text):
     """Send notification to Hamza on WhatsApp (and log)."""
@@ -509,6 +550,9 @@ def handle_admin(text):
                 "/delvoice <الموضوع> — مسح صوت\n\n"
                 "⚙️ **التحكم:**\n"
                 "/stats — إحصائيات المحادثات\n"
+                "/chats — آخر المحادثات (للمراجعة)\n"
+                "/unknown — الأسئلة الغير مفهومة\n"
+                "/clearunknown — مسح الأسئلة\n"
                 "/pause — إيقاف الردود التلقائية\n"
                 "/resume — استئناف الردود\n"
                 "/reply <رقم> <رسالة> — الرد على زبون\n"
@@ -517,7 +561,39 @@ def handle_admin(text):
         n = len(CONV)
         total = sum(len(c.get("history", [])) for c in CONV.values())
         paused = "⏸️ متوقفة" if os.path.exists(PAUSED_FILE) else "▶️ خدامة"
-        return f"📊 **الإحصائيات:**\n👥 الزبناء: {n}\n💬 الرسائل: {total}\n🤖 الحالة: {paused}"
+        unknown = _load_json(os.path.join(_HERE, "unknown_queries.json"), [])
+        return (f"📊 **الإحصائيات:**\n👥 الزبناء: {n}\n💬 الرسائل: {total}\n"
+                f"🤖 الحالة: {paused}\n❓ أسئلة غير مفهومة: {len(unknown)}")
+    if cmd == "/chats":
+        # show recent conversations for Hamza to review
+        if not CONV:
+            return "📭 ما كاين حتى محادثة."
+        lines = ["💬 **آخر المحادثات:**\n"]
+        items = sorted(CONV.items(),
+                       key=lambda x: x[1].get("history", [{}])[-1].get("ts", 0) if x[1].get("history") else 0,
+                       reverse=True)[:5]
+        for wa_id, c in items:
+            name = c.get("name", "?")
+            hist = c.get("history", [])[-4:]
+            lines.append(f"\n👤 {name} ({wa_id}):")
+            for h in hist:
+                who = "🧑" if h.get("from") == "user" else "🤖"
+                lines.append(f"  {who} {h.get('text', '')[:80]}")
+        lines.append("\n💡 راجع المحادثات وقول ليا شنو نصلح!")
+        return "\n".join(lines)
+    if cmd == "/unknown":
+        # show questions the bot didn't understand (learning)
+        unknown = _load_json(os.path.join(_HERE, "unknown_queries.json"), [])
+        if not unknown:
+            return "✅ ما كاين حتى سؤال غير مفهوم!"
+        lines = ["❓ **أسئلة ما فهمتهاش:**\n"]
+        for q in unknown[-10:]:
+            lines.append(f"• {q.get('text', '')[:100]} ({q.get('count', 1)}x)")
+        lines.append("\n💡 قول ليا الجواب المناسب لكل سؤال!")
+        return "\n".join(lines)
+    if cmd == "/clearunknown":
+        _save_json(os.path.join(_HERE, "unknown_queries.json"), [])
+        return "🗑️ تمسحات الأسئلة الغير مفهومة."
     if cmd == "/pause":
         open(PAUSED_FILE, "w").write("1")
         return "⏸️ الردود التلقائية **توقفت**. نتا غادي تجاوب يدوياً دابا."
