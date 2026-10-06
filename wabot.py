@@ -2,16 +2,19 @@
 """
 WhatsApp Smart Bot for Hamza's e-commerce.
 Receives customer messages via Meta webhook, replies intelligently in Darija,
-integrates with the shop supplier API, and takes admin commands from Hamza.
+and takes admin commands from Hamza (including product management).
 
 Env vars (Railway, never in code):
   WA_TOKEN        WhatsApp Business API permanent access token
   WA_PHONE_ID     Phone Number ID
   WA_VERIFY       Webhook verify token (any random string you choose)
   ADMIN_WA        Hamza's WhatsApp number (e.g. 212600000000) for admin commands
-  SHOP_API_KEY    Shop Reseller API key (for live product data)
-  SHOP_BASE_URL   Shop API host (default: worker-production-53ca.up.railway.app)
   PORT            (Railway sets this)
+
+Products are managed via WhatsApp admin commands:
+  /addproduct <name> | <price> | <description>
+  /delproduct <name>
+  /products
 """
 import html
 import json
@@ -23,7 +26,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-VERSION = "2026-10-06-w1"
+VERSION = "2026-10-06-w2"
 
 # ---------------------------------------------------------------- config ---
 def clean(v):
@@ -33,14 +36,13 @@ WA_TOKEN = clean(os.environ.get("WA_TOKEN", ""))
 WA_PHONE_ID = clean(os.environ.get("WA_PHONE_ID", ""))
 WA_VERIFY = os.environ.get("WA_VERIFY", "hamza_verify_123").strip()
 ADMIN_WA = "".join(c for c in os.environ.get("ADMIN_WA", "") if c.isdigit())
-SHOP_API_KEY = clean(os.environ.get("SHOP_API_KEY", ""))
-SHOP_BASE_URL = os.environ.get("SHOP_BASE_URL", "worker-production-53ca.up.railway.app").rstrip("/")
 
 GRAPH = f"https://graph.facebook.com/v21.0/{WA_PHONE_ID}/messages"
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 CONV_FILE = os.path.join(_HERE, "conversations.json")
 PAUSED_FILE = os.path.join(_HERE, "paused.flag")
+PRODUCTS_FILE = os.path.join(_HERE, "products.json")
 
 # ---------------------------------------------------------------- helpers --
 def _load_json(path, default):
@@ -81,37 +83,21 @@ def wa_send(to, text):
         print("wa_send failed:", e)
         return False
 
-def shop(path):
-    url = f"https://{SHOP_BASE_URL}{path}"
-    req = urllib.request.Request(url, headers={"X-API-Key": SHOP_API_KEY})
-    with urllib.request.urlopen(req, timeout=20) as r:
-        return json.loads(r.read())
+# ------------------------------------------------------- products -----
+# Products are managed by Hamza via WhatsApp admin commands.
+# Stored in products.json: [{"name": "...", "price": "...", "desc": "..."}]
+def get_products():
+    return _load_json(PRODUCTS_FILE, [])
 
-PRODUCTS = {"items": [], "ts": 0}
-def get_products(force=False):
-    if not force and time.time() - PRODUCTS["ts"] < 300 and PRODUCTS["items"]:
-        return PRODUCTS["items"]
-    try:
-        res = shop("/api/products")
-        items = res.get("products", res.get("items", [])) if isinstance(res, dict) else res
-        PRODUCTS["items"] = items or []
-        PRODUCTS["ts"] = time.time()
-    except Exception as e:
-        print("shop products failed:", e)
-    return PRODUCTS["items"]
+def save_products(items):
+    _save_json(PRODUCTS_FILE, items)
 
-def prod_name(p, lang="ar"):
-    for k in (f"name_{lang}", "name_en", "name_ar", "name_ru", "name", "title"):
-        v = p.get(k)
-        if isinstance(v, str) and v.strip():
-            return v.strip()
-    return f"#{p.get('id', '?')}"
-
-def prod_price(p):
-    try:
-        return round(float(p.get("price", 0)) * 1.30, 2)
-    except Exception:
-        return 0.0
+def find_product(query):
+    """Search products by name fragment."""
+    q = query.lower().strip()
+    if len(q) < 2:
+        return []
+    return [p for p in get_products() if q in p.get("name", "").lower()][:5]
 
 # ------------------------------------------------------- smart replies ----
 GREETINGS = ("سلام", "salam", "مرحبا", "مرحب", "hello", "hi", "hey",
@@ -186,31 +172,17 @@ def detect_intent(text):
             return intent
     return None
 
-def find_product(query):
-    """Search products by name fragment."""
-    q = query.lower().strip()
-    if len(q) < 2:
-        return []
-    out = []
-    for p in get_products():
-        name = prod_name(p).lower()
-        if q in name:
-            out.append(p)
-    return out[:5]
-
 def handle_products(to):
     prods = get_products()
     if not prods:
-        return "😔 دابا ما كاين حتى منتج متوفر. جرب من بعد!"
+        return ("🛍️ **المنتجات:**\n\n"
+                "دابا ما كاين حتى منتج مسجل.\n"
+                "تواصل معانا باش نعطيوك اللائحة! 📩")
     lines = ["🛍️ **المنتجات المتوفرة:**\n"]
-    for p in prods[:15]:
-        name = prod_name(p)
-        price = prod_price(p)
-        stock = p.get("stock", p.get("stock_count", 1))
-        mark = "🟢" if (isinstance(stock, (int, float)) and stock > 0) else "🔴"
-        lines.append(f"{mark} {name} — **${price}**")
-    if len(prods) > 15:
-        lines.append(f"\n...و {len(prods) - 15} منتجات أخرى. كتب اسم منتج معين للبحث!")
+    for p in prods[:20]:
+        lines.append(f"🟢 {p.get('name', '?')} — **{p.get('price', '?')}**")
+    if len(prods) > 20:
+        lines.append(f"\n...و {len(prods) - 20} منتجات أخرى.")
     lines.append("\nكتب *اسم المنتج* باش تشوف التفاصيل.")
     return "\n".join(lines)
 
@@ -221,13 +193,9 @@ def handle_product_query(to, text):
                 "كتب *منتجات* باش تشوف اللائحة، ولا جرب اسم آخر.")
     lines = []
     for p in found:
-        name = prod_name(p)
-        price = prod_price(p)
-        desc = p.get("description_ar") or p.get("description_en") or ""
-        stock = p.get("stock", p.get("stock_count", 1))
-        avail = "🟢 متوفر" if (isinstance(stock, (int, float)) and stock > 0) else "🔴 غير متوفر"
-        lines.append(f"📦 **{name}**\n{avail} — **${price}**" +
-                     (f"\n📝 {desc[:150]}" if desc else ""))
+        desc = p.get("desc", "")
+        lines.append(f"📦 **{p.get('name', '?')}**\n🟢 متوفر — **{p.get('price', '?')}**" +
+                     (f"\n📝 {desc[:200]}" if desc else ""))
     lines.append("\nباش تشري، كتب: *بغيت نشري* + اسم المنتج")
     return "\n\n".join(lines)
 
@@ -289,12 +257,16 @@ def handle_admin(text):
 
     if cmd == "/help":
         return ("🤖 **أوامر الإدارة:**\n\n"
+                "📦 **المنتجات:**\n"
+                "/addproduct <اسم> | <ثمن> | <وصف> — زيد منتج\n"
+                "/delproduct <اسم> — مسح منتج\n"
+                "/products — لائحة المنتجات\n\n"
+                "⚙️ **التحكم:**\n"
                 "/stats — إحصائيات المحادثات\n"
                 "/pause — إيقاف الردود التلقائية\n"
                 "/resume — استئناف الردود\n"
                 "/reply <رقم> <رسالة> — الرد على زبون\n"
-                "/broadcast <رسالة> — رسالة جماعية ⚠️\n"
-                "/products — تحديث لائحة المنتجات")
+                "/broadcast <رسالة> — رسالة جماعية ⚠️")
     if cmd == "/stats":
         n = len(CONV)
         total = sum(len(c.get("history", [])) for c in CONV.values())
@@ -308,8 +280,32 @@ def handle_admin(text):
             os.remove(PAUSED_FILE)
         return "▶️ الردود التلقائية **خدامة** من جديد."
     if cmd == "/products":
-        prods = get_products(force=True)
-        return f"🔄 تحدثات اللائحة: {len(prods)} منتج."
+        prods = get_products()
+        if not prods:
+            return "📦 ما كاين حتى منتج. زيد بـ /addproduct"
+        lines = [f"📦 **المنتجات ({len(prods)}):**\n"]
+        for p in prods:
+            lines.append(f"• {p.get('name')} — {p.get('price')}")
+        return "\n".join(lines)
+    if cmd == "/addproduct" and arg:
+        parts_p = [x.strip() for x in arg.split("|")]
+        if len(parts_p) < 2:
+            return "⚠️ الاستعمال:\n/addproduct <اسم> | <ثمن> | <وصف اختياري>\n\nمثال:\n/addproduct Netflix 1 شهر | 50 درهم | حساب خاص"
+        prods = get_products()
+        # replace if same name exists
+        prods = [p for p in prods if p.get("name", "").lower() != parts_p[0].lower()]
+        prods.append({"name": parts_p[0], "price": parts_p[1],
+                      "desc": parts_p[2] if len(parts_p) > 2 else ""})
+        save_products(prods)
+        return f"✅ تزاد المنتج: **{parts_p[0]}** — {parts_p[1]}"
+    if cmd == "/delproduct" and arg:
+        prods = get_products()
+        before = len(prods)
+        prods = [p for p in prods if arg.lower() not in p.get("name", "").lower()]
+        if len(prods) == before:
+            return f"⚠️ ما لقيتش منتج باسم '{arg}'"
+        save_products(prods)
+        return f"🗑️ تمسح. بقاو {len(prods)} منتجات."
     if cmd == "/reply" and arg:
         sp = arg.split(None, 1)
         if len(sp) == 2 and wa_send(sp[0], f"💬 {sp[1]}"):
