@@ -27,7 +27,7 @@ import urllib.request
 import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-VERSION = "2026-10-06-w8"
+VERSION = "2026-10-06-w9"
 
 # ---------------------------------------------------------------- config ---
 def clean(v):
@@ -218,10 +218,12 @@ REPLIES = {
         "التوصيل عبر واتساب نيشان 📩"
     ),
     "payment": (
-        "💳 **طرق الدفع المتوفرة:**\n"
-        "• 🟡 Binance Pay\n"
-        "• 🟢 USDT (BEP20 / TRC20)\n\n"
-        "ملي تختار المنتج غادي نعطيك التفاصيل باش تخلص."
+        "💳 **طريقة الدفع:**\n\n"
+        "شنو البنك اللي عندك؟ 🏦\n\n"
+        "1️⃣ CIH\n"
+        "2️⃣ Cash Plus\n"
+        "3️⃣ التجاري وفا بنك\n\n"
+        "كتب ليا الرقم ولا اسم البنك 👇"
     ),
     "thanks": "العفو! 😊 إلا احتجتي شي حاجة أخرى أنا هنا.",
     "bye": "مع السلامة! 👋 نتمنى نشوفك قريب.",
@@ -237,6 +239,57 @@ REPLIES = {
         "• *مسؤول* — تهضر مع الإنسان"
     ),
 }
+
+# ------------------------------------------------------- payment details ---
+# Hamza's payment methods. Bot asks client which bank they have,
+# then sends the matching details. Defaults to CIH.
+PAYMENT_DETAILS = {
+    "cih": (
+        "🏦 **CIH Bank**\n\n"
+        "💳 البطاقة:\n"
+        "5025483211017100\n\n"
+        "🔢 RIB:\n"
+        "230640502548321101710027\n\n"
+        "👤 الاسم: AZEMAT Hamza\n\n"
+        "ملي تخلص، صيفط ليا **سكرينشوت** التحويل 📸"
+    ),
+    "cashplus": (
+        "💰 **Cash Plus**\n\n"
+        "📱 الرقم:\n"
+        "0627469836\n\n"
+        "ملي تخلص، صيفط ليا **سكرينشوت** التحويل 📸"
+    ),
+    "tijari": (
+        "🏦 **التجاري وفا بنك**\n\n"
+        "🔢 RIB:\n"
+        "007640001004200030300712\n\n"
+        "👤 الاسم: Azemat hamza\n\n"
+        "ملي تخلص، صيفط ليا **سكرينشوت** التحويل 📸"
+    ),
+}
+
+BANK_KEYWORDS = {
+    "cih": ("cih", "سياش", "1"),
+    "cashplus": ("cash", "كاش", "plus", "بلس", "2"),
+    "tijari": ("tijari", "تجاري", "وفا", "wafa", "3"),
+}
+
+def detect_bank(text):
+    """Detect which bank the client chose. Returns key or None."""
+    low = text.lower()
+    for key, kws in BANK_KEYWORDS.items():
+        if any(k in low for k in kws):
+            return key
+    return None
+
+def handle_payment_choice(text):
+    """Client answered the bank question. Returns reply text."""
+    bank = detect_bank(text)
+    if bank:
+        return PAYMENT_DETAILS[bank]
+    # no bank matched — default to CIH as Hamza instructed
+    return ("ما فهمتش البنك بالضبط، ها معلومات **CIH** (تقدر تختار غيرو):\n\n"
+            + PAYMENT_DETAILS["cih"])
 
 def detect_intent(text):
     low = text.lower()
@@ -292,11 +345,24 @@ def smart_reply(to, text, name=""):
         notify_admin(f"🙋 زبون طلب المسؤول\n👤 {name} ({to})\n💬 {text[:500]}")
         return "✅ توصّلت برسالتك! المسؤول غادي يجاوبك قريباً. 🙏"
 
+    # payment bank choice state
+    if conv.get("awaiting_payment_choice"):
+        conv["awaiting_payment_choice"] = False
+        _save_json(CONV_FILE, CONV)
+        reply = handle_payment_choice(text)
+        conv["history"].append({"from": "bot", "text": reply[:500], "ts": time.time()})
+        _save_json(CONV_FILE, CONV)
+        return reply
+
     intent = detect_intent(text)
     if intent == "greeting":
         reply = REPLIES["greeting"]
     elif intent == "products":
         reply = handle_products(to)
+    elif intent == "payment":
+        conv["awaiting_payment_choice"] = True
+        _save_json(CONV_FILE, CONV)
+        reply = REPLIES["payment"]
     elif intent == "human":
         conv["awaiting_human_msg"] = True
         _save_json(CONV_FILE, CONV)
