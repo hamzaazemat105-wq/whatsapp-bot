@@ -27,7 +27,7 @@ import urllib.request
 import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-VERSION = "2026-10-06-w16"
+VERSION = "2026-10-06-w17"
 
 # ---------------------------------------------------------------- config ---
 def clean(v):
@@ -890,10 +890,16 @@ def process_payload(payload):
         for entry in payload.get("entry", []):
             for change in entry.get("changes", []):
                 val = change.get("value", {})
-                for msg in val.get("messages", []):
+                msgs = val.get("messages", [])
+                if msgs:
+                    print(f"WEBHOOK: {len(msgs)} message(s) from {val.get('contacts', [{}])[0].get('wa_id', '?')}")
+                for msg in msgs:
                     wa_id = msg.get("from", "")
                     name = val.get("contacts", [{}])[0].get("profile", {}).get("name", "")
                     mtype = msg.get("type", "")
+                    # log referral (ad clicks) for debugging
+                    if msg.get("referral"):
+                        print(f"AD REFERRAL from {wa_id}: {msg['referral'].get('source_type', '?')}")
                     # admin voice notes
                     if mtype == "audio" and ADMIN_WA and wa_id.endswith(ADMIN_WA[-9:]):
                         media_id = msg.get("audio", {}).get("id", "")
@@ -901,10 +907,22 @@ def process_payload(payload):
                         handle_admin_audio(wa_id, media_id)
                         continue
                     if mtype != "text":
+                        print(f"SKIP non-text {mtype} from {wa_id}")
                         continue
                     text = msg.get("text", {}).get("body", "")
+                    if not text.strip():
+                        print(f"SKIP empty text from {wa_id}")
+                        continue
                     print(f"INCOMING WA {wa_id}: {text[:80]}")
-                    handle_message(wa_id, text, name)
+                    try:
+                        handle_message(wa_id, text, name)
+                    except Exception as e:
+                        print(f"HANDLE ERROR for {wa_id}: {e}")
+                        # fallback: try simple reply so client isn't ignored
+                        try:
+                            wa_send(wa_id, "مرحباً! 👋\n" + handle_products(wa_id))
+                        except Exception as e2:
+                            print(f"FALLBACK FAILED: {e2}")
     except Exception as e:
         print("payload error:", e)
 
