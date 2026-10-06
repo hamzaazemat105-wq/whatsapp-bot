@@ -27,7 +27,7 @@ import urllib.request
 import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-VERSION = "2026-10-06-w14"
+VERSION = "2026-10-06-w15"
 
 # ---------------------------------------------------------------- config ---
 def clean(v):
@@ -232,7 +232,7 @@ def handle_product_choice(to, text, matches):
                  "first": 0, "second": 1, "third": 2}
     for kw, idx in num_words.items():
         if kw in low and idx < len(matches):
-            return format_single_product(matches[idx])
+            return format_single_product(matches[idx], to)
     # 2. find distinguishing words between variants
     #    (words that appear in one variant but not others)
     all_names = [p.get("name", "").lower() for p in matches]
@@ -247,7 +247,7 @@ def handle_product_choice(to, text, matches):
                       if len(w) >= 4][:5]
         for w in name_words + desc_words:
             if w in low:
-                return format_single_product(p)
+                return format_single_product(p, to)
     # 3. variant keywords (shared/private, career/business, etc.)
     variant_kws = {
         "personnel": ("personnel", "privé", "prive", "خاص", "شخصي", "personal", "private"),
@@ -259,7 +259,7 @@ def handle_product_choice(to, text, matches):
         nl = p.get("name", "").lower()
         for vkey, kws in variant_kws.items():
             if vkey in nl and any(k in low for k in kws):
-                return format_single_product(p)
+                return format_single_product(p, to)
     # 4. fuzzy match against variant names
     best, best_score = None, 0
     for p in matches:
@@ -267,21 +267,43 @@ def handle_product_choice(to, text, matches):
         if s > best_score:
             best_score, best = s, p
     if best and best_score >= 0.5:
-        return format_single_product(best)
+        return format_single_product(best, to)
     # 5. still unclear: list options again
     lines = ["ما فهمتش، ختار واحد من هادو 👇\n"]
     for i, p in enumerate(matches, 1):
         lines.append(f"{i}️⃣ {p.get('name', '?')} — **{p.get('price', '?')}**")
     return "\n".join(lines)
 
-def format_single_product(p):
+def format_single_product(p, to=None):
+    """Show product and guide toward purchase. Sets conversational state."""
     desc = p.get("desc", "")
     out = (f"📦 **{p.get('name', '?')}**\n"
            f"💰 الثمن: **{p.get('price', '?')}**")
     if desc:
         out += f"\n📝 {desc[:200]}"
-    out += ("\n\nباش تشري، كتب: *بغيت نخلص* 💳")
+    out += ("\n\n👌 **بغيتي تاخدو؟**\n"
+            "كتب *اه* باش نكملو، ولا *لا* باش تشوف منتجات أخرى")
+    # track interest for conversation flow
+    if to:
+        conv = CONV.setdefault(to, {"name": "", "history": []})
+        conv["interested_product"] = p.get("name", "")
+        conv["awaiting_purchase_decision"] = True
+        _save_json(CONV_FILE, CONV)
     return out
+
+YES_WORDS = ("اه", "نعم", "واخا", "ok", "oui", "yes", "بغيتو", "سير", "ناخدو",
+             "تمام", "صافي", "يلا", "بغيت", "موافق")
+NO_WORDS = ("لا", "non", "no", "بلاش", "ما بغيتش", "مابغيتش")
+
+def detect_yes_no(text):
+    low = text.lower().strip()
+    if any(w == low or low.startswith(w + " ") or low.endswith(" " + w) or f" {w} " in f" {low} "
+           for w in YES_WORDS):
+        return "yes"
+    if any(w == low or low.startswith(w + " ") or low.endswith(" " + w) or f" {w} " in f" {low} "
+           for w in NO_WORDS):
+        return "no"
+    return None
 
 # ------------------------------------------------------- smart replies ----
 GREETINGS = ("سلام", "salam", "مرحبا", "مرحب", "hello", "hi", "hey",
@@ -308,13 +330,14 @@ INTENTS = [
 
 REPLIES = {
     "greeting": (
-        "مرحباً بيك! 👋\n"
-        "أنا المساعد الذكي ديال المتجر.\n\n"
-        "شنو نقدر نعاونك فيه؟\n"
-        "• 🛍️ المنتجات والأثمنة — كتب *منتجات*\n"
-        "• 💳 طرق الدفع\n"
-        "• 🚚 التوصيل\n"
-        "• 📦 تتبع طلبك"
+        "مرحباً بيك أخي! 👋\n"
+        "كيف نقدر نعاونك اليوم؟ 😊\n\n"
+        "عندنا خدمات رقمية بأثمنة مناسبة:\n"
+        "• 🤖 ChatGPT Plus\n"
+        "• 🎨 Canva Pro\n"
+        "• 🎬 CapCut Pro\n"
+        "• 💎 وغيرهم...\n\n"
+        "شنو كتقلب على؟ كتب ليا اسم المنتج ولا *منتجات* باش تشوف الكل"
     ),
     "price": (
         "💰 الأثمنة ديالنا مناسبة بزاف!\n"
@@ -429,7 +452,7 @@ def handle_product_query(to, text):
         return ("🔍 Produit non trouvé.\n"
                 "Écris *produits* pour voir la liste.")
     if len(found) == 1:
-        return format_single_product(found[0])
+        return format_single_product(found[0], to)
     # multiple variants: ask which one (e.g. ChatGPT shared vs private)
     conv = CONV.setdefault(to, {"name": "", "history": []})
     conv["awaiting_product_choice"] = [p.get("name", "") for p in found]
@@ -476,6 +499,38 @@ def smart_reply(to, text, name=""):
         conv["history"].append({"from": "bot", "text": reply[:500], "ts": time.time()})
         _save_json(CONV_FILE, CONV)
         return reply
+
+    # purchase decision state (client said yes/no to buying)
+    if conv.get("awaiting_purchase_decision"):
+        yn = detect_yes_no(text)
+        if yn == "yes":
+            conv.pop("awaiting_purchase_decision", None)
+            conv["awaiting_payment_choice"] = True
+            _save_json(CONV_FILE, CONV)
+            prod = conv.get("interested_product", "")
+            reply = (f"ممتاز! 🎉 اخترتي **{prod}**\n\n" + REPLIES["payment"])
+            conv["history"].append({"from": "bot", "text": reply[:500], "ts": time.time()})
+            _save_json(CONV_FILE, CONV)
+            return reply
+        elif yn == "no":
+            conv.pop("awaiting_purchase_decision", None)
+            conv.pop("interested_product", None)
+            _save_json(CONV_FILE, CONV)
+            reply = ("ما مشكل! 👍\n\n" + handle_products(to))
+            conv["history"].append({"from": "bot", "text": reply[:500], "ts": time.time()})
+            _save_json(CONV_FILE, CONV)
+            return reply
+        # unclear: check if they mentioned another product instead
+        found = find_product(text)
+        if found:
+            conv.pop("awaiting_purchase_decision", None)
+            _save_json(CONV_FILE, CONV)
+            # fall through to normal product handling below
+        else:
+            reply = "كتب *اه* باش نكملو الشراء، ولا *لا* باش تشوف منتجات أخرى 😊"
+            conv["history"].append({"from": "bot", "text": reply[:500], "ts": time.time()})
+            _save_json(CONV_FILE, CONV)
+            return reply
 
     intent = detect_intent(text)
     if intent == "greeting":
