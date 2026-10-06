@@ -15,6 +15,15 @@ Products are managed via WhatsApp admin commands:
   /addproduct <name> | <price> | <description>
   /delproduct <name>
   /products
+
+PATCHED 2026-10-06 (w3):
+  1. handle_message: admin numbers whose text is NOT an admin command now fall
+     through to the customer flow (smart_reply), so Hamza can test the bot as
+     a customer from his own number. Previously any message from the admin
+     number that wasn't a /command was silently dropped (no reply at all).
+  2. notify_admin: now actually sends the notification to Hamza on WhatsApp
+     via wa_send(ADMIN_WA, ...), instead of only printing to logs. This makes
+     the "مسؤول" (human handoff) flow notify Hamza.
 """
 import html
 import json
@@ -26,7 +35,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-VERSION = "2026-10-06-w2"
+VERSION = "2026-10-06-w3"
 
 # ---------------------------------------------------------------- config ---
 def clean(v):
@@ -244,9 +253,10 @@ def smart_reply(to, text, name=""):
     return reply
 
 def notify_admin(text):
-    """Send notification to Hamza (via Telegram bot if configured, else log)."""
+    """Send notification to Hamza on WhatsApp (and log)."""
     print("ADMIN NOTIFY:", text[:200])
-    # TODO: forward to Telegram admin via bot API when TELEGRAM_ADMIN configured
+    if ADMIN_WA:
+        wa_send(ADMIN_WA, text)
 
 # ------------------------------------------------------- admin commands ---
 def handle_admin(text):
@@ -373,12 +383,14 @@ def process_payload(payload):
         print("payload error:", e)
 
 def handle_message(wa_id, text, name=""):
-    # admin?
+    # admin? (admin commands still handled; anything else falls through to
+    # the customer flow so Hamza can test the bot as a customer from his
+    # own number)
     if ADMIN_WA and wa_id.endswith(ADMIN_WA[-9:]):
         reply = handle_admin(text)
         if reply:
             wa_send(wa_id, reply)
-        return
+            return
     # customer
     reply = smart_reply(wa_id, text, name)
     if reply:
