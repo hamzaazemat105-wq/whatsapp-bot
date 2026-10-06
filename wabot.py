@@ -24,9 +24,10 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-VERSION = "2026-10-06-w4"
+VERSION = "2026-10-06-w5"
 
 # ---------------------------------------------------------------- config ---
 def clean(v):
@@ -79,6 +80,13 @@ def wa_send(to, text):
     try:
         with urllib.request.urlopen(req, timeout=20) as r:
             return json.loads(r.read()).get("messages") is not None
+    except urllib.error.HTTPError as e:
+        try:
+            err_body = e.read().decode()[:500]
+        except Exception:
+            err_body = "<unreadable>"
+        print(f"wa_send failed: HTTP {e.code}: {err_body}")
+        return False
     except Exception as e:
         print("wa_send failed:", e)
         return False
