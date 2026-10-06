@@ -27,7 +27,7 @@ import urllib.request
 import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-VERSION = "2026-10-06-w15"
+VERSION = "2026-10-06-w16"
 
 # ---------------------------------------------------------------- config ---
 def clean(v):
@@ -310,22 +310,29 @@ GREETINGS = ("سلام", "salam", "مرحبا", "مرحب", "hello", "hi", "hey"
              "bonjour", "salut", "cc", "صباح", "مساء", "اهلا", "أهلا")
 
 INTENTS = [
-    (("ثمن", "شحال", "prix", "price", "combien", "tarif", "سعر", "بشحال"),
+    (("ثمن", "شحال", "prix", "price", "combien", "tarif", "سعر", "بشحال",
+      "شحال داير", "شحال ثمن", "بكم", "كم السعر"),
      "price"),
-    (("توصيل", "livraison", "delivery", "توصل", "شحن", "تجيب"),
+    (("توصيل", "livraison", "delivery", "توصل", "شحن", "تجيب",
+      "وقتاش", "شحال الوقت", "مدة التوصيل", "امتى توصل"),
      "delivery"),
-    (("خلص", "دفع", "paiement", "payment", "pay", "بينانس", "binance", "usdt"),
+    (("خلص", "دفع", "paiement", "payment", "pay", "بينانس", "binance", "usdt",
+      "كيفاش نخلص", "طريقة الدفع", "comment payer", "نخلص", "الدفع"),
      "payment"),
-    (("منتج", "product", "produit", "شنو عندك", "catalogue", "كتالوج", "list"),
+    (("منتج", "product", "produit", "شنو عندك", "catalogue", "كتالوج", "list",
+      "شنو عندكم", "شنو كتبيعو", "شنو متوفر", "لائحة", "liste", "اش عندك"),
      "products"),
-    (("طلب", "order", "commande", "كوموند", "بغيت نشري", "acheter", "buy"),
+    (("طلب", "order", "commande", "كوموند", "بغيت نشري", "acheter", "buy",
+      "بغيت ناخد", "ناخد", "نشري"),
      "order"),
     (("انسان", "humain", "personne", "بشر", "مسؤول", "مول", "صاحب"),
      "human"),
-    (("شكرا", "merci", "thanks", "thank"),
+    (("شكرا", "merci", "thanks", "thank", "متشكر"),
      "thanks"),
     (("باي", "bye", "au revoir", "سلامة", "الى اللقاء"),
      "bye"),
+    (("متوفر", "كاين", "موجود", "disponible", "dispo", "واش كاين"),
+     "availability"),
 ]
 
 REPLIES = {
@@ -359,6 +366,10 @@ REPLIES = {
     ),
     "thanks": "العفو! 😊 إلا احتجتي شي حاجة أخرى أنا هنا.",
     "bye": "مع السلامة! 👋 نتمنى نشوفك قريب.",
+    "availability": (
+        "✅ اه، كلشي **متوفر** دابا! 🟢\n\n"
+        "شنو بغيتي؟ كتب ليا اسم المنتج 👇"
+    ),
     "human": (
         "تمام، غادي نوصّل رسالتك للمسؤول وهو غادي يجاوبك قريباً. 🙏\n"
         "كتب ليا شنو بغيتي توصّل ليه:"
@@ -546,17 +557,30 @@ def smart_reply(to, text, name=""):
         _save_json(CONV_FILE, CONV)
         reply = REPLIES["human"]
     elif intent in REPLIES:
-        reply = REPLIES[intent]
+        # contextual: if asking price and we know which product they mean
+        if intent == "price" and conv.get("interested_product"):
+            pname = conv["interested_product"]
+            for p in get_products():
+                if p.get("name", "") == pname:
+                    reply = (f"💰 **{pname}**\nالثمن: **{p.get('price', '?')}**\n\n"
+                             f"👌 بغيتي تاخدو؟ كتب *اه*")
+                    conv["awaiting_purchase_decision"] = True
+                    _save_json(CONV_FILE, CONV)
+                    break
+            else:
+                reply = REPLIES[intent]
+        else:
+            reply = REPLIES[intent]
     elif intent == "order":
-        reply = ("تمام! 🛒\n"
-                 "كتب ليا *اسم المنتج* اللي بغيتي تشريه ونكمل معاك الخطوات.")
+        reply = ("تمام! 🛒 ختار المنتج اللي بغيتي 👇\n\n" + handle_products(to))
     else:
         # try product search before fallback
         found = find_product(text)
         if found:
             reply = handle_product_query(to, text)
         else:
-            reply = REPLIES["fallback"]
+            # Hamza's rule: when confused, send product list (keeps client engaged)
+            reply = ("🤔 هاك شوف شنو عندنا 👇\n\n" + handle_products(to))
             # log unknown query for learning
             log_unknown_query(text)
 
