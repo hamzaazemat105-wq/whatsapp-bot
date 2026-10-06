@@ -27,7 +27,7 @@ import urllib.request
 import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-VERSION = "2026-10-06-w5"
+VERSION = "2026-10-06-w6"
 
 # ---------------------------------------------------------------- config ---
 def clean(v):
@@ -90,6 +90,66 @@ def wa_send(to, text):
     except Exception as e:
         print("wa_send failed:", e)
         return False
+
+def wa_send_audio(to, audio_url):
+    """Send a WhatsApp audio/voice message via Business API."""
+    if not WA_TOKEN or not WA_PHONE_ID:
+        print("WA not configured, would send audio to", to, ":", audio_url[:80])
+        return False
+    body = json.dumps({
+        "messaging_product": "whatsapp",
+        "to": to,
+        "type": "audio",
+        "audio": {"link": audio_url},
+    }).encode()
+    req = urllib.request.Request(GRAPH, data=body, method="POST",
+                                 headers={"Authorization": f"Bearer {WA_TOKEN}",
+                                          "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return json.loads(r.read()).get("messages") is not None
+    except urllib.error.HTTPError as e:
+        try:
+            err_body = e.read().decode()[:500]
+        except Exception:
+            err_body = "<unreadable>"
+        print(f"wa_send_audio failed: HTTP {e.code}: {err_body}")
+        return False
+    except Exception as e:
+        print("wa_send_audio failed:", e)
+        return False
+
+# ------------------------------------------------------- voice -----
+# Voice messages recorded by Hamza, stored in audio/ directory.
+# Maps intent -> audio filename. Served via /audio/<filename> endpoint.
+# Hamza sends voice notes via WhatsApp; admin command /setvoice maps them.
+VOICE_FILE = os.path.join(_HERE, "voice.json")
+
+def get_voice_map():
+    return _load_json(VOICE_FILE, {})
+
+def save_voice_map(m):
+    _save_json(VOICE_FILE, m)
+
+def voice_url(filename):
+    """Public URL for an audio file served by this bot."""
+    base = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "")
+    if base:
+        return f"https://{base}/audio/{filename}"
+    # fallback: construct from known domain
+    return f"https://whatsapp-bot-production-ba5c.up.railway.app/audio/{filename}"
+
+def send_voice_for_intent(to, intent):
+    """Send Hamza's voice recording for an intent, if one is mapped. Returns True if sent."""
+    vmap = get_voice_map()
+    filename = vmap.get(intent)
+    if not filename:
+        return False
+    fpath = os.path.join(_HERE, "audio", filename)
+    if not os.path.exists(fpath):
+        print(f"voice file missing: {filename}")
+        return False
+    return wa_send_audio(to, voice_url(filename))
 
 # ------------------------------------------------------- products -----
 # Products are managed by Hamza via WhatsApp admin commands.
@@ -270,6 +330,10 @@ def handle_admin(text):
                 "/addproduct <اسم> | <ثمن> | <وصف> — زيد منتج\n"
                 "/delproduct <اسم> — مسح منتج\n"
                 "/products — لائحة المنتجات\n\n"
+                "🎙️ **الصوت:**\n"
+                "/setvoice <الموضوع> — ربط فويس نوت بموضوع\n"
+                "/voices — لائحة الأصوات\n"
+                "/delvoice <الموضوع> — مسح صوت\n\n"
                 "⚙️ **التحكم:**\n"
                 "/stats — إحصائيات المحادثات\n"
                 "/pause — إيقاف الردود التلقائية\n"
@@ -315,6 +379,46 @@ def handle_admin(text):
             return f"⚠️ ما لقيتش منتج باسم '{arg}'"
         save_products(prods)
         return f"🗑️ تمسح. بقاو {len(prods)} منتجات."
+    if cmd == "/voices":
+        vmap = get_voice_map()
+        if not vmap:
+            return ("🎙️ **الرسائل الصوتية:**\n\n"
+                    "ما كاين حتى تسجيل.\n"
+                    "صيفط فويس نوت + /setvoice <الموضوع>")
+        lines = ["🎙️ **الرسائل الصوتية:**\n"]
+        for intent, fname in vmap.items():
+            lines.append(f"• {intent} → {fname}")
+        return "\n".join(lines)
+    if cmd == "/setvoice" and arg:
+        # Usage: /setvoice <intent> — then send the voice note as the next message
+        intent = arg.strip().lower()
+        # find admin conversation to store pending intent
+        # (we don't have wa_id here, so store globally keyed by intent expectation)
+        # Instead: store in a temp file that handle_admin_audio will check
+        vmap = get_voice_map()
+        vmap[intent] = f"{intent}.ogg"
+        save_voice_map(vmap)
+        # mark pending in CONV for admin (find admin wa_id)
+        for wid, c in CONV.items():
+            if ADMIN_WA and wid.endswith(ADMIN_WA[-9:]):
+                c["pending_voice_intent"] = intent
+        _save_json(CONV_FILE, CONV)
+        # also save to a simple pending file as fallback
+        try:
+            with open(os.path.join(_HERE, "pending_voice.txt"), "w") as f:
+                f.write(intent)
+        except Exception:
+            pass
+        return (f"🎙️ تسجل الموضوع: **{intent}**\n\n"
+                f"دابا صيفط ليا **الفويس نوت** هنا في واتساب 📩\n\n"
+                f"المواضيع: greeting, products, price, payment, delivery, order, thanks, bye, product, fallback")
+    if cmd == "/delvoice" and arg:
+        vmap = get_voice_map()
+        if arg.strip().lower() in vmap:
+            del vmap[arg.strip().lower()]
+            save_voice_map(vmap)
+            return f"🗑️ تمسح الصوت ديال {arg}"
+        return f"⚠️ ما لقيتش صوت للموضوع '{arg}'"
     if cmd == "/reply" and arg:
         sp = arg.split(None, 1)
         if len(sp) == 2 and wa_send(sp[0], f"💬 {sp[1]}"):
@@ -351,6 +455,27 @@ class H(BaseHTTPRequestHandler):
         if self.path == "/version":
             self.send_response(200); self.end_headers()
             self.wfile.write(f"wabot:{VERSION}".encode()); return
+        if self.path.startswith("/audio/"):
+            # Serve Hamza's voice recordings
+            fname = os.path.basename(urllib.parse.urlparse(self.path).path)
+            if not fname or "/" in fname or fname.startswith("."):
+                self.send_response(400); self.end_headers(); return
+            fpath = os.path.join(_HERE, "audio", fname)
+            if not os.path.exists(fpath):
+                self.send_response(404); self.end_headers(); return
+            ctype = "audio/ogg" if fname.endswith(".ogg") else "audio/mpeg"
+            try:
+                with open(fpath, "rb") as f:
+                    data = f.read()
+                self.send_response(200)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+            except Exception as e:
+                print("audio serve error:", e)
+                self.send_response(500); self.end_headers()
+            return
         self.send_response(404); self.end_headers()
 
     def do_POST(self):
@@ -375,17 +500,81 @@ class H(BaseHTTPRequestHandler):
         self.send_response(200); self.end_headers()
         self.wfile.write(b"ok")
 
+def wa_download_media(media_id, save_path):
+    """Download media from WhatsApp API and save to file."""
+    if not WA_TOKEN:
+        print("WA not configured, cannot download media")
+        return False
+    try:
+        # Step 1: get download URL
+        url = f"https://graph.facebook.com/v21.0/{media_id}"
+        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {WA_TOKEN}"})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            info = json.loads(r.read())
+        dl_url = info.get("url")
+        if not dl_url:
+            print("no download url for media", media_id)
+            return False
+        # Step 2: download file
+        req2 = urllib.request.Request(dl_url, headers={"Authorization": f"Bearer {WA_TOKEN}"})
+        with urllib.request.urlopen(req2, timeout=60) as r2:
+            data = r2.read()
+        with open(save_path, "wb") as f:
+            f.write(data)
+        print(f"downloaded media {media_id} -> {save_path} ({len(data)} bytes)")
+        return True
+    except Exception as e:
+        print("wa_download_media failed:", e)
+        return False
+
+def handle_admin_audio(wa_id, media_id):
+    """Hamza sent a voice note — save it for the pending /setvoice intent."""
+    conv = CONV.get(wa_id, {})
+    pending = conv.get("pending_voice_intent")
+    if not pending:
+        # fallback: check pending file
+        try:
+            pf = os.path.join(_HERE, "pending_voice.txt")
+            if os.path.exists(pf):
+                with open(pf) as f:
+                    pending = f.read().strip()
+        except Exception:
+            pass
+    if not pending:
+        wa_send(wa_id, "🎙️ صيفط /setvoice <الموضوع> أولاً، من بعد صيفط الفويس نوت.")
+        return
+    filename = f"{pending}.ogg"
+    fpath = os.path.join(_HERE, "audio", filename)
+    os.makedirs(os.path.join(_HERE, "audio"), exist_ok=True)
+    if wa_download_media(media_id, fpath):
+        conv.pop("pending_voice_intent", None)
+        _save_json(CONV_FILE, CONV)
+        try:
+            os.remove(os.path.join(_HERE, "pending_voice.txt"))
+        except Exception:
+            pass
+        wa_send(wa_id, f"✅ تحفظ الصوت للموضوع: **{pending}** 🎙️\nدابا الكليان غادي يسمع صوتك!")
+    else:
+        wa_send(wa_id, "⚠️ فشل تحميل الصوت. عاود المحاولة.")
+
 def process_payload(payload):
     try:
         for entry in payload.get("entry", []):
             for change in entry.get("changes", []):
                 val = change.get("value", {})
                 for msg in val.get("messages", []):
-                    if msg.get("type") != "text":
-                        continue
                     wa_id = msg.get("from", "")
-                    text = msg.get("text", {}).get("body", "")
                     name = val.get("contacts", [{}])[0].get("profile", {}).get("name", "")
+                    mtype = msg.get("type", "")
+                    # admin voice notes
+                    if mtype == "audio" and ADMIN_WA and wa_id.endswith(ADMIN_WA[-9:]):
+                        media_id = msg.get("audio", {}).get("id", "")
+                        print(f"INCOMING WA AUDIO {wa_id}: {media_id}")
+                        handle_admin_audio(wa_id, media_id)
+                        continue
+                    if mtype != "text":
+                        continue
+                    text = msg.get("text", {}).get("body", "")
                     print(f"INCOMING WA {wa_id}: {text[:80]}")
                     handle_message(wa_id, text, name)
     except Exception as e:
@@ -404,6 +593,12 @@ def handle_message(wa_id, text, name=""):
     reply = smart_reply(wa_id, text, name)
     if reply:
         wa_send(wa_id, reply)
+        # send Hamza's voice recording for this intent (if mapped)
+        intent = detect_intent(text)
+        if not intent and find_product(text):
+            intent = "product"
+        if intent:
+            send_voice_for_intent(wa_id, intent)
 
 def main():
     port = int(os.environ.get("PORT", "8080"))
