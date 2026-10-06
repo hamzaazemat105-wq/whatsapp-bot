@@ -27,7 +27,7 @@ import urllib.request
 import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-VERSION = "2026-10-06-w11"
+VERSION = "2026-10-06-w12"
 
 # ---------------------------------------------------------------- config ---
 def clean(v):
@@ -171,12 +171,94 @@ def get_products():
 def save_products(items):
     _save_json(PRODUCTS_FILE, items)
 
+def _similarity(a, b):
+    """Simple similarity ratio 0-1 for typo-tolerant matching."""
+    a, b = a.lower(), b.lower()
+    if not a or not b:
+        return 0.0
+    # exact substring = perfect
+    if a in b or b in a:
+        return 1.0
+    # character overlap ratio
+    set_a, set_b = set(a), set(b)
+    overlap = len(set_a & set_b) / max(len(set_a | set_b), 1)
+    # prefix bonus
+    prefix = 0
+    for x, y in zip(a, b):
+        if x == y:
+            prefix += 1
+        else:
+            break
+    prefix_ratio = prefix / max(len(a), len(b), 1)
+    return overlap * 0.5 + prefix_ratio * 0.5
+
 def find_product(query):
-    """Search products by name fragment."""
+    """Search products by name fragment, typo-tolerant."""
     q = query.lower().strip()
+    # remove common filler words
+    for w in ("بغيت", "بغيت نشري", "عطيني", "شحال", "ثمن", "ديال", "plus",
+              "je veux", "acheter", "donne", "moi", "prix", "de", "le", "la", "un", "une"):
+        q = q.replace(w, " ")
+    q = " ".join(q.split())
     if len(q) < 2:
         return []
-    return [p for p in get_products() if q in p.get("name", "").lower()][:5]
+    scored = []
+    for p in get_products():
+        name = p.get("name", "").lower()
+        # score each word of query against product name
+        words = [w for w in q.split() if len(w) >= 2]
+        if not words:
+            continue
+        # also try the whole query
+        best = _similarity(q, name)
+        for w in words:
+            # check word against each word in product name
+            for nw in name.split():
+                s = _similarity(w, nw)
+                if s > best:
+                    best = s
+        if best >= 0.55:
+            scored.append((best, p))
+    scored.sort(key=lambda x: -x[0])
+    return [p for _, p in scored[:5]]
+
+def handle_product_choice(to, text, matches):
+    """Customer is choosing between multiple product variants."""
+    low = text.lower()
+    # try to match their answer to one of the variants
+    for p in matches:
+        name_low = p.get("name", "").lower()
+        # check for variant keywords
+        if any(k in low for k in ("personnel", "privé", "prive", "خاص", "شخصي", "personal", "1")) and \
+           any(k in name_low for k in ("personnel", "privé", "prive", "شخصي")):
+            return format_single_product(p)
+        if any(k in low for k in ("partagé", "partage", "مشترك", "shared", "2")) and \
+           any(k in name_low for k in ("partagé", "partage", "مشترك")):
+            return format_single_product(p)
+    # fallback: try fuzzy match against variant names
+    best = None
+    best_score = 0
+    for p in matches:
+        s = _similarity(low, p.get("name", "").lower())
+        if s > best_score:
+            best_score = s
+            best = p
+    if best and best_score >= 0.5:
+        return format_single_product(best)
+    # still unclear: list the options again
+    lines = ["ما فهمتش، ختار واحد من هادو 👇\n"]
+    for i, p in enumerate(matches, 1):
+        lines.append(f"{i}️⃣ {p.get('name', '?')} — **{p.get('price', '?')}**")
+    return "\n".join(lines)
+
+def format_single_product(p):
+    desc = p.get("desc", "")
+    out = (f"📦 **{p.get('name', '?')}**\n"
+           f"💰 الثمن: **{p.get('price', '?')}**")
+    if desc:
+        out += f"\n📝 {desc[:200]}"
+    out += ("\n\nباش تشري، كتب: *بغيت نخلص* 💳")
+    return out
 
 # ------------------------------------------------------- smart replies ----
 GREETINGS = ("سلام", "salam", "مرحبا", "مرحب", "hello", "hi", "hey",
@@ -323,13 +405,17 @@ def handle_product_query(to, text):
     if not found:
         return ("🔍 Produit non trouvé.\n"
                 "Écris *produits* pour voir la liste.")
-    lines = []
-    for p in found:
-        desc = p.get("desc", "")
-        lines.append(f"📦 **{p.get('name', '?')}**\n🟢 Disponible — **{p.get('price', '?')}**" +
-                     (f"\n📝 {desc[:200]}" if desc else ""))
-    lines.append("\nPour acheter, écris: *je veux acheter* + nom du produit")
-    return "\n\n".join(lines)
+    if len(found) == 1:
+        return format_single_product(found[0])
+    # multiple variants: ask which one (e.g. ChatGPT shared vs private)
+    conv = CONV.setdefault(to, {"name": "", "history": []})
+    conv["awaiting_product_choice"] = [p.get("name", "") for p in found]
+    _save_json(CONV_FILE, CONV)
+    lines = ["🤔 كاين جوج أنواع — **شنو بغيتي؟** 👇\n"]
+    for i, p in enumerate(found, 1):
+        lines.append(f"{i}️⃣ {p.get('name', '?')} — **{p.get('price', '?')}**")
+    lines.append("\nكتب *مشترك* ولا *خاص* (ولا الرقم)")
+    return "\n".join(lines)
 
 def smart_reply(to, text, name=""):
     """Main reply logic. Returns reply text (or None if admin handles)."""
@@ -354,6 +440,16 @@ def smart_reply(to, text, name=""):
         conv["awaiting_payment_choice"] = False
         _save_json(CONV_FILE, CONV)
         reply = handle_payment_choice(text)
+        conv["history"].append({"from": "bot", "text": reply[:500], "ts": time.time()})
+        _save_json(CONV_FILE, CONV)
+        return reply
+
+    # product variant choice state (e.g. ChatGPT shared vs private)
+    if conv.get("awaiting_product_choice"):
+        names = conv.pop("awaiting_product_choice")
+        _save_json(CONV_FILE, CONV)
+        matches = [p for p in get_products() if p.get("name", "") in names]
+        reply = handle_product_choice(to, text, matches)
         conv["history"].append({"from": "bot", "text": reply[:500], "ts": time.time()})
         _save_json(CONV_FILE, CONV)
         return reply
