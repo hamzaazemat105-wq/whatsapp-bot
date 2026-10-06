@@ -27,7 +27,7 @@ import urllib.request
 import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-VERSION = "2026-10-06-DISABLED"
+VERSION = "2026-10-06-w18"
 
 # ---------------------------------------------------------------- config ---
 def clean(v):
@@ -885,12 +885,7 @@ def handle_admin_audio(wa_id, media_id):
     else:
         wa_send(wa_id, "⚠️ فشل تحميل الصوت. عاود المحاولة.")
 
-BOT_DISABLED = True  # cancelled by Hamza 2026-10-06
-
 def process_payload(payload):
-    if BOT_DISABLED:
-        print("Bot disabled, ignoring webhook")
-        return
     try:
         for entry in payload.get("entry", []):
             for change in entry.get("changes", []):
