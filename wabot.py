@@ -27,7 +27,7 @@ import urllib.request
 import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-VERSION = "2026-10-06-w6"
+VERSION = "2026-10-06-w7"
 
 # ---------------------------------------------------------------- config ---
 def clean(v):
@@ -155,7 +155,14 @@ def send_voice_for_intent(to, intent):
 # Products are managed by Hamza via WhatsApp admin commands.
 # Stored in products.json: [{"name": "...", "price": "...", "desc": "..."}]
 def get_products():
-    return _load_json(PRODUCTS_FILE, [])
+    prods = _load_json(PRODUCTS_FILE, [])
+    if not prods:
+        # first run: seed from bundled product list
+        seed = _load_json(os.path.join(_HERE, "products_seed.json"), [])
+        if seed:
+            _save_json(PRODUCTS_FILE, seed)
+            return seed
+    return prods
 
 def save_products(items):
     _save_json(PRODUCTS_FILE, items)
