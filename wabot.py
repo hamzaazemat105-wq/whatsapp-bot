@@ -27,7 +27,7 @@ import urllib.request
 import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-VERSION = "2026-10-06-w19"
+VERSION = "2026-10-06-w20"
 
 # ---------------------------------------------------------------- config ---
 def clean(v):
@@ -961,10 +961,18 @@ def handle_message(wa_id, text, name=""):
         if reply:
             wa_send(wa_id, reply)
             return
+    # customer — forward copy to admin so Hamza sees it in his WhatsApp
+    is_new = wa_id not in CONV or not CONV[wa_id].get("history")
+    fwd = f"📩 من {name or wa_id} ({wa_id}):\n{text[:500]}"
+    notify_admin(fwd)
+    if is_new:
+        notify_admin(f"🆕 كليان جديد: {name or wa_id} ({wa_id})")
     # customer
     reply = smart_reply(wa_id, text, name)
     if reply:
         wa_send(wa_id, reply)
+        # forward bot's reply to admin too
+        notify_admin(f"🤖 رد البوت على {name or wa_id}:\n{reply[:500]}")
         # send Hamza's voice recording for this intent (if mapped)
         intent = detect_intent(text)
         if not intent and find_product(text):
