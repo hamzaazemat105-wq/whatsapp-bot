@@ -27,7 +27,7 @@ import urllib.request
 import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-VERSION = "2026-10-06-w18"
+VERSION = "2026-10-06-w19"
 
 # ---------------------------------------------------------------- config ---
 def clean(v):
@@ -630,6 +630,7 @@ def handle_admin(text):
                 "⚙️ **التحكم:**\n"
                 "/stats — إحصائيات المحادثات\n"
                 "/chats — آخر المحادثات (للمراجعة)\n"
+                "/chat <رقم> — المحادثة الكاملة مع كليان\n"
                 "/unknown — الأسئلة الغير مفهومة\n"
                 "/clearunknown — مسح الأسئلة\n"
                 "/pause — إيقاف الردود التلقائية\n"
@@ -658,8 +659,33 @@ def handle_admin(text):
             for h in hist:
                 who = "🧑" if h.get("from") == "user" else "🤖"
                 lines.append(f"  {who} {h.get('text', '')[:80]}")
-        lines.append("\n💡 راجع المحادثات وقول ليا شنو نصلح!")
+        lines.append("\n💡 باش تشوف محادثة كاملة: /chat <الرقم>")
+        lines.append("💡 راجع المحادثات وقول ليا شنو نصلح!")
         return "\n".join(lines)
+    if cmd == "/chat":
+        # show FULL conversation with a specific client: /chat <number>
+        target = arg.strip().replace(" ", "").replace("+", "")
+        if not target:
+            return "📝 الاستعمال: /chat <رقم الهاتف>\nمثال: /chat 0612345678"
+        # find matching conversation (partial match on last digits)
+        match_id = None
+        for wa_id in CONV:
+            if wa_id.endswith(target[-9:]) or target[-9:] in wa_id:
+                match_id = wa_id
+                break
+        if not match_id:
+            return f"❌ ما لقيت حتى محادثة مع {target}"
+        c = CONV[match_id]
+        name = c.get("name", "?")
+        hist = c.get("history", [])
+        if not hist:
+            return f"📭 ما كاين حتى رسالة مع {name}."
+        lines = [f"💬 **محادثة كاملة مع {name} ({match_id}):**\n"]
+        for h in hist:
+            who = "🧑 كليان" if h.get("from") == "user" else "🤖 بوت"
+            lines.append(f"{who}: {h.get('text', '')}")
+            lines.append("")
+        return "\n".join(lines)[:4000]
     if cmd == "/unknown":
         # show questions the bot didn't understand (learning)
         unknown = _load_json(os.path.join(_HERE, "unknown_queries.json"), [])
