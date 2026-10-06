@@ -15,15 +15,6 @@ Products are managed via WhatsApp admin commands:
   /addproduct <name> | <price> | <description>
   /delproduct <name>
   /products
-
-PATCHED 2026-10-06 (w3):
-  1. handle_message: admin numbers whose text is NOT an admin command now fall
-     through to the customer flow (smart_reply), so Hamza can test the bot as
-     a customer from his own number. Previously any message from the admin
-     number that wasn't a /command was silently dropped (no reply at all).
-  2. notify_admin: now actually sends the notification to Hamza on WhatsApp
-     via wa_send(ADMIN_WA, ...), instead of only printing to logs. This makes
-     the "مسؤول" (human handoff) flow notify Hamza.
 """
 import html
 import json
@@ -35,7 +26,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-VERSION = "2026-10-06-w3"
+VERSION = "2026-10-06-w4"
 
 # ---------------------------------------------------------------- config ---
 def clean(v):
@@ -357,11 +348,21 @@ class H(BaseHTTPRequestHandler):
     def do_POST(self):
         if not self.path.startswith("/webhook"):
             self.send_response(404); self.end_headers(); return
-        length = int(self.headers.get("Content-Length", 0))
+        # Some clients/proxies send Expect: 100-continue; answer it before reading body
+        if self.headers.get("Expect", "").lower() == "100-continue":
+            self.send_response_only(100)
+            self.end_headers()
         try:
-            payload = json.loads(self.rfile.read(length) or b"{}")
-        except Exception:
+            length = int(self.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            length = 0
+        try:
+            raw = self.rfile.read(length) if length > 0 else b""
+            payload = json.loads(raw or b"{}")
+        except Exception as e:
+            print("webhook read error:", e)
             payload = {}
+        print(f"WEBHOOK POST hit, payload keys: {list(payload.keys())}")
         threading.Thread(target=process_payload, args=(payload,), daemon=True).start()
         self.send_response(200); self.end_headers()
         self.wfile.write(b"ok")
