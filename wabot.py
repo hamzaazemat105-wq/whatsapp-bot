@@ -27,7 +27,7 @@ import urllib.request
 import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-VERSION = "2026-10-06-w9"
+VERSION = "2026-10-06-w10"
 
 # ---------------------------------------------------------------- config ---
 def clean(v):
@@ -462,7 +462,7 @@ def handle_admin(text):
         for intent, fname in vmap.items():
             lines.append(f"• {intent} → {fname}")
         return "\n".join(lines)
-    if cmd == "/setvoice" and arg:
+    if cmd in ("/setvoice", "/setboice") and arg:
         # Usage: /setvoice <intent> — then send the voice note as the next message
         intent = arg.strip().lower()
         # find admin conversation to store pending intent
